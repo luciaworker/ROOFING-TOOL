@@ -1,29 +1,15 @@
-import pandas as pd
 import requests
-from bs4 import BeautifulSoup
-import json
+import csv
+import io
 import random
-import os
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
+import os
 
 # --- Configuración ---
-CSV_FILE = "NAL60P202501.csv"
 CSV_URL = "https://www.dropbox.com/scl/fi/aawvto3fjvat6vwmizasa/NAL60P202501.csv?rlkey=x192ureknjobrrm7obsmobzvl&st=tre4vojr&dl=1"
 BASE_PAPA_DETAIL = "https://pbcpao.gov/Property/Details"
 DEFAULT_LIMIT = 50
-
-# --- Descargar el CSV si no existe ---
-if not os.path.exists(CSV_FILE):
-    print("📥 Descargando CSV desde Dropbox...")
-    try:
-        r = requests.get(CSV_URL)
-        r.raise_for_status()
-        with open(CSV_FILE, "wb") as f:
-            f.write(r.content)
-        print("✅ CSV descargado correctamente.")
-    except Exception as e:
-        print(f"❌ Error al descargar el CSV: {e}")
-
 
 app = Flask(__name__)
 
@@ -81,30 +67,37 @@ def scraper():
     except:
         objetivo_validas = DEFAULT_LIMIT
 
+    # --- Descargar CSV en streaming desde Dropbox ---
     try:
-        df = pd.read_csv(CSV_FILE, dtype=str)
-    except FileNotFoundError:
-        return jsonify({"error": f"Archivo CSV '{CSV_FILE}' no encontrado"}), 500
+        r = requests.get(CSV_URL, stream=True)
+        r.raise_for_status()
+        content = io.StringIO(r.content.decode("utf-8", errors="ignore"))
+        reader = csv.DictReader(content)
+    except Exception as e:
+        return jsonify({"error": f"No se pudo leer el CSV: {str(e)}"}), 500
 
-    df_filtrado = df[df["PHY_ZIPCD"] == zip_input]
-    if df_filtrado.empty:
+    # --- Filtrar solo las filas que coinciden con el ZIP ---
+    parcel_data = []
+    for row in reader:
+        if row.get("PHY_ZIPCD") == zip_input:
+            pid = str(row.get("PARCEL_ID")).zfill(17)
+            addr = row.get("PHY_ADDR1")
+            parcel_data.append((pid, addr))
+
+    if not parcel_data:
         return jsonify({"error": f"No se encontraron parcelas con ZIP {zip_input}"}), 404
 
-    parcel_data = [
-        (str(pid).zfill(17), addr)
-        for pid, addr in zip(df_filtrado["PARCEL_ID"], df_filtrado["PHY_ADDR1"])
-    ]
-
+    # --- Extraer detalles desde la web de PAPA ---
     resultados = []
     contador_total = 0
+    random.shuffle(parcel_data)
 
     with requests.Session() as session:
-        random.shuffle(parcel_data)
         for parcel_id, direccion in parcel_data:
             contador_total += 1
             try:
                 detalle_url = f"{BASE_PAPA_DETAIL}?parcelId={parcel_id}"
-                r = session.get(detalle_url, timeout=20)
+                r = session.get(detalle_url, timeout=15)
                 soup = BeautifulSoup(r.text, "html.parser")
                 datos = extraer_detalle(soup, direccion, parcel_id)
 
@@ -125,3 +118,5 @@ def scraper():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
+
